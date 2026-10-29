@@ -1,0 +1,15 @@
+{
+  "name": "insta-to-google-chat-port",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Two-way bridge between Instagram Direct Messages and Google Chat",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/*.test.js"
+  }
+}
