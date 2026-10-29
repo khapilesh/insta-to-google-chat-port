@@ -51,6 +51,7 @@ person's last DM.** No amount of code gets around that. See [Limits](#limits).
 | `src/store.js` | JSON-file state: conversation ↔ thread mapping, last-inbound time |
 | `scripts/demo.js` | Runs the whole flow offline against fake transports |
 | `test/` | 29 tests: routing, windows, signatures, JWT verification |
+| `docs/UNOFFICIAL-ROUTE.md` | Why Instagram group chats are impossible officially, and what the workarounds really cost |
 
 No runtime dependencies — Node 18+ standard library only.
 
@@ -138,6 +139,7 @@ These are platform rules, not implementation gaps.
 | **Workspace requirement** | Free Gmail accounts cannot install Chat apps. |
 | **Media** | Instagram CDN URLs are signed and expire; the bridge posts the URL as text. Re-uploading media to Chat needs a download-and-upload step. |
 | **No typing/read receipts** | Only `messages` are bridged; read and reaction events are parsed but ignored. |
+| **No group chats** | Meta: *"Group messaging is not supported. An Instagram professional account can only converse with one customer per conversation."* Group threads can't be read or written by any official API — see [docs/UNOFFICIAL-ROUTE.md](docs/UNOFFICIAL-ROUTE.md) for what that leaves you. |
 
 ### What *not* to do
 
@@ -150,6 +152,11 @@ sanctioned way, and it is enough for a support-inbox workflow.
 If the Workspace requirement is the blocker, the same bridge pattern works with
 **Slack** (free tier is fine) or **Telegram** — swap `src/googlechat.js` for another
 transport; the routing in `src/bridge.js` doesn't change.
+
+Wanting a **group chat** rather than a per-person inbox? The official API cannot do it at
+all. [docs/UNOFFICIAL-ROUTE.md](docs/UNOFFICIAL-ROUTE.md) compares the four ways people
+try anyway (private-API libraries, an on-device notification relay, WhatsApp Groups API,
+Telegram), with the ban, credential and privacy costs spelled out.
 
 ---
 
