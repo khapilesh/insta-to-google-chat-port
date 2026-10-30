@@ -1,15 +1,21 @@
 # insta-to-google-chat-port
 
-A two-way bridge: Instagram DMs land in a Google Chat space, and replying in that
-Chat thread sends the message back as an Instagram DM.
+A two-way bridge between Instagram DMs and a destination your team can actually reply
+from. Two destinations ship in this repo — run either or both:
+
+* **Google Chat** — each Instagram conversation becomes its own thread in a space.
+* **Password-protected web inbox** — a self-hosted inbox at `/login`, no Google
+  Workspace account needed, works from any browser or phone.
 
 Short answer to "is this possible?" — **yes, both directions, but only through the
 official APIs, which means two things must be true before you write a line of code:**
 
 1. **The Instagram account must be Business or Creator**, linked to a Facebook Page,
    with `instagram_business_manage_messages` approved through Meta App Review.
-2. **The Google Chat side must be a Google Workspace account.** Chat apps cannot be
-   built or tested with a free `@gmail.com` account
+2. **Pick a destination.** The web inbox needs nothing but a password, so it works with
+   a free Google account — or no Google account at all. The Google Chat destination
+   additionally requires a **Google Workspace** account, because Chat apps cannot be
+   built or tested on `@gmail.com`
    ([Google's docs](https://developers.google.com/workspace/chat/quickstart/apps-script-app)).
 
 Both directions also share one hard law: **you can only reply within 24 hours of the
@@ -29,6 +35,9 @@ person's last DM.** No amount of code gets around that. See [Limits](#limits).
                                                    ▼
                          POST /webhooks/google-chat ◄── teammate replies in thread
                          (Google-signed JWT)      │
+                                                  │
+                         POST /inbox/:id/reply ◄── or replies in the web inbox
+                         (session + CSRF)         │
                                                   ▼
                                         Instagram Send API
 ```
@@ -48,9 +57,12 @@ person's last DM.** No amount of code gets around that. See [Limits](#limits).
 | `src/bridge.js` | All routing logic and the 24-hour window rules |
 | `src/instagram.js` | `parseWebhook`, HMAC signature check, Send API client |
 | `src/googlechat.js` | Chat API client, service-account JWT flow, request verification |
-| `src/store.js` | JSON-file state: conversation ↔ thread mapping, last-inbound time |
+| `src/auth.js` | scrypt password hashing, signed HttpOnly sessions, CSRF tokens, login throttle |
+| `src/inbox.js` | Password-protected web inbox: server-rendered pages, reply handling, SSE |
+| `src/events.js` | Server-sent-events hub so open tabs update live |
+| `src/store.js` | JSON-file state: conversation ↔ thread mapping, message history, last-inbound time |
 | `scripts/demo.js` | Runs the whole flow offline against fake transports |
-| `test/` | 29 tests: routing, windows, signatures, JWT verification |
+| `test/` | 44 tests: routing, windows, signatures, JWT verification, auth, inbox |
 | `docs/UNOFFICIAL-ROUTE.md` | Why Instagram group chats are impossible officially, and what the workarounds really cost |
 
 No runtime dependencies — Node 18+ standard library only.
@@ -59,7 +71,7 @@ No runtime dependencies — Node 18+ standard library only.
 
 ```bash
 npm run demo     # full conversation played out offline
-npm test         # 29 tests
+npm test         # 44 tests
 ```
 
 The demo exercises the real `Bridge` and `parseWebhook` code; only the two network
@@ -124,6 +136,75 @@ curl https://your-host/healthz
 
 ---
 
+## Option B: the password-protected web inbox
+
+If you'd rather not put customer DMs into a Google Space — or you're on a free Google
+account — point the bridge at its own inbox instead. Set one variable:
+
+```bash
+INBOX_PASSWORD='a long random passphrase'
+SESSION_SECRET="$(openssl rand -base64 32)"
+COOKIE_SECURE=true          # false only for plain-http local testing
+npm start
+```
+
+Then open `https://your-host/login`. That's the whole setup — no Workspace account, no
+Google Cloud project, no service account, no Chat app configuration.
+
+What you get:
+
+* **Conversation list** — every Instagram conversation, newest first, with its reply-window
+  state and a preview of the last message.
+* **Thread view** — full history, with the 24-hour countdown shown as a badge that turns
+  amber (human-agent) or red (closed).
+* **Reply box** — sends through the same Instagram Send API path as the Chat bridge, with
+  identical window enforcement and the same `HUMAN_AGENT` fallback. When a send is
+  refused, the reason appears in the thread rather than being silently dropped.
+* **Live updates** — an SSE stream reloads open tabs when a new DM arrives.
+* **Progressive enhancement** — it's a plain HTML form; no JavaScript is required to read
+  or send, and the composer restores an unsent draft after a reload.
+
+Run both destinations at once if you like: inbound DMs are recorded in the inbox *and*
+posted to Google Chat, and a reply from either side goes out once.
+
+### How the password protection works
+
+Not a `.htpasswd` afterthought — every item below is covered by a test:
+
+| Concern | Implementation |
+| --- | --- |
+| Password storage | `scrypt` (N=16384) with a per-account random salt; plain `INBOX_PASSWORD` is hashed in memory at boot and never stored |
+| Session | Stateless HMAC-SHA256 token in an **HttpOnly**, **SameSite=Lax**, **Secure** cookie with an expiry; tampering or expiry → signed out |
+| CSRF | Per-session token embedded in every form and compared in constant time |
+| Brute force | Per-IP fixed-window throttle on `/login` (8 attempts / 15 min), then `429` |
+| XSS | Every Instagram- or user-supplied value is escaped; strict CSP (`default-src 'none'`, no inline script, no framing) |
+| Clickjacking | `frame-ancestors 'none'` plus `X-Frame-Options: DENY` |
+| Open redirects | `next` accepts relative paths only — `//evil.example` is ignored |
+| Unauthenticated access | All inbox routes redirect to `/login`; nothing is served without a session |
+| Empty config | With no password set, the inbox routes are **not mounted at all** — there is no accidentally-open inbox |
+
+Login is intentionally single-factor. If you need per-person accounts, set
+`INBOX_USERS="alice:pass,bob:pass"` and each session records who sent what. For anything
+beyond a small team, put it behind Cloudflare Access, Tailscale, or your VPN — that's the
+cheapest way to add SSO, MFA, and IP rules without writing them.
+
+### Operational reality
+
+The JSON store now holds **customer message history in plaintext**. That changes your
+obligations:
+
+* Back up `data/store.json` like a database, and encrypt the disk (`LUKS`, EBS
+  encryption, whatever your host offers).
+* `chmod 600` the file and don't commit it — it's already in `.gitignore`.
+* For more than one instance, move the store to SQLite/Postgres; a single JSON file is
+  not safe for concurrent writers.
+* Add a retention policy. Old conversations don't need to live forever, and deleting them
+  reduces what a leak exposes.
+* You are now the controller of that data. If you have EU/UK customers, the privacy notice
+  on your site needs to mention that DMs are stored and who can read them.
+
+---
+
 ## Limits
 
 These are platform rules, not implementation gaps.
@@ -149,9 +230,10 @@ and would break the moment Meta changes an internal endpoint. They also violate
 Google Chat's terms by scraping. The official webhook path above is the only
 sanctioned way, and it is enough for a support-inbox workflow.
 
-If the Workspace requirement is the blocker, the same bridge pattern works with
-**Slack** (free tier is fine) or **Telegram** — swap `src/googlechat.js` for another
-transport; the routing in `src/bridge.js` doesn't change.
+If the Workspace requirement is the blocker, use the **web inbox** above — same bridge,
+no Google account needed. The same pattern also works with **Slack** (free tier is fine)
+or **Telegram**: swap `src/googlechat.js` for another transport; the routing in
+`src/bridge.js` doesn't change.
 
 Wanting a **group chat** rather than a per-person inbox? The official API cannot do it at
 all. [docs/UNOFFICIAL-ROUTE.md](docs/UNOFFICIAL-ROUTE.md) compares the four ways people
@@ -171,8 +253,10 @@ Telegram), with the ban, credential and privacy costs spelled out.
 * **Idempotent by default.** Both platforms redeliver; `store.seen()` covers a 6-hour
   window per message id.
 * **Fail closed.** No `IG_APP_SECRET` → webhooks rejected. No
-  `GOOGLE_CHAT_PROJECT_NUMBER` → Chat requests rejected. Neither silently accepts
-  unauthenticated traffic.
+  `GOOGLE_CHAT_PROJECT_NUMBER` → Chat requests rejected. No `INBOX_PASSWORD` → inbox
+  routes don't exist. None of them silently accept unauthenticated traffic.
+* **One window, three transports.** `Bridge.windowState()` is the only place the 24-hour
+  rule lives, so Chat replies, inbox replies, and the UI badge can't drift apart.
 
 ## Next steps worth doing
 

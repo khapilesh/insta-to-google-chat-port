@@ -57,6 +57,15 @@ export function loadConfig(env = process.env) {
       skipJwtVerification: bool(env.SKIP_CHAT_JWT_VERIFICATION, false),
     },
 
+    inbox: {
+      password: env.INBOX_PASSWORD || '',
+      passwordHash: env.INBOX_PASSWORD_HASH || '',
+      users: env.INBOX_USERS || '',
+      sessionSecret: env.SESSION_SECRET || '',
+      sessionTtlMs: Number(env.SESSION_TTL_HOURS || 12) * 60 * 60 * 1000,
+      cookieSecure: bool(env.COOKIE_SECURE, true),
+    },
+
     storePath: env.STORE_PATH || './data/store.json',
     // Meta's standard messaging window, in hours, measured from the last
     // inbound Instagram message.

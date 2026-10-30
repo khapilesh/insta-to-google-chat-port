@@ -3,8 +3,10 @@ import path from 'node:path';
 
 const SEEN_TTL_MS = 6 * 60 * 60 * 1000;
 
+const MAX_MESSAGES_PER_CONVERSATION = 500;
+
 function emptyState() {
-  return { conversations: {}, threads: {}, seen: {} };
+  return { conversations: {}, threads: {}, seen: {}, messages: {} };
 }
 
 /**
@@ -64,6 +66,43 @@ export class Store {
 
   getConversation(igsid) {
     return this.state.conversations[igsid];
+  }
+
+  /** Newest-first list for the web inbox. */
+  listConversations() {
+    return Object.values(this.state.conversations).sort(
+      (a, b) => (b.lastMessageAt || b.lastInboundAt || 0) - (a.lastMessageAt || a.lastInboundAt || 0),
+    );
+  }
+
+  messages(igsid) {
+    return this.state.messages[igsid] || [];
+  }
+
+  lastMessage(igsid) {
+    const list = this.state.messages[igsid];
+    return list && list.length ? list[list.length - 1] : undefined;
+  }
+
+  /**
+   * Append one message to a conversation's history.
+   * @param {{igsid: string, direction: 'in'|'out', text: string, at?: number,
+   *          id?: string, author?: string}} message
+   */
+  appendMessage({ igsid, direction, text, at = this.now(), id = '', author = '' }) {
+    if (!igsid) return undefined;
+    const conv = this.conversation(igsid);
+    const list = this.state.messages[igsid] || (this.state.messages[igsid] = []);
+    if (id && list.some((m) => m.id === id)) return undefined;
+
+    const record = { id: id || `${at}-${direction}-${list.length}`, direction, text, at, author };
+    list.push(record);
+    if (list.length > MAX_MESSAGES_PER_CONVERSATION) {
+      list.splice(0, list.length - MAX_MESSAGES_PER_CONVERSATION);
+    }
+    conv.lastMessageAt = at;
+    this.save();
+    return record;
   }
 
   conversationForThread(threadName) {

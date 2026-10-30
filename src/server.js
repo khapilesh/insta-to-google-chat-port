@@ -11,6 +11,9 @@ import {
   verifyChatRequest,
 } from './googlechat.js';
 import { Bridge } from './bridge.js';
+import { createAuthService } from './auth.js';
+import { createEventHub } from './events.js';
+import { createInboxRoutes } from './inbox.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -62,6 +65,7 @@ export function createApp({
   bridge,
   instagramClient,
   chat,
+  inboxRoutes = null,
   log = console,
   verifyChatJwt = verifyChatRequest,
   fetchImpl = fetch,
@@ -76,6 +80,7 @@ export function createApp({
           ok: true,
           instagramConfigured: Boolean(instagramClient?.configured),
           chatSpace: config.chat.space || null,
+          webInbox: Boolean(inboxRoutes),
           windowHours: config.windowHours,
         });
       }
@@ -148,8 +153,11 @@ export function createApp({
         return sendJson(res, 200, {});
       }
 
+      // Password-protected web inbox (only mounted when a password is set).
+      if (inboxRoutes && (await inboxRoutes(req, res, url))) return;
+
       if (url.pathname === '/') {
-        return sendText(res, 200, 'Instagram <-> Google Chat bridge. See /healthz.\n');
+        return sendText(res, 200, 'Instagram bridge. See /healthz.\n');
       }
 
       return sendJson(res, 404, { error: 'not found' });
@@ -160,7 +168,7 @@ export function createApp({
   };
 }
 
-export function startServer(config, { log = console } = {}) {
+export async function startServer(config, { log = console } = {}) {
   const store = new Store(config.storePath);
 
   const instagramClient = createInstagramClient({
@@ -186,28 +194,45 @@ export function startServer(config, { log = console } = {}) {
   }
 
   const chat = createChatClient({ apiBase: config.chat.apiBase, getToken, log });
-  const bridge = new Bridge({ store, instagram: instagramClient, chat, config, log });
+  const events = createEventHub();
+  const bridge = new Bridge({ store, instagram: instagramClient, chat, config, log, events });
 
-  const server = createServer(createApp({ config, bridge, instagramClient, chat, log }));
-  return { server, store, bridge, chat, instagramClient };
+  const auth = await createAuthService({
+    password: config.inbox.password,
+    passwordHash: config.inbox.passwordHash,
+    users: config.inbox.users,
+    sessionSecret: config.inbox.sessionSecret,
+    sessionTtlMs: config.inbox.sessionTtlMs,
+    cookieSecure: config.inbox.cookieSecure,
+    log,
+  });
+
+  const inboxRoutes = createInboxRoutes({ auth, store, bridge, events, log });
+
+  const server = createServer(
+    createApp({ config, bridge, instagramClient, chat, inboxRoutes, log }),
+  );
+  return { server, store, bridge, chat, instagramClient, events, auth, inboxRoutes };
 }
 
-function main() {
+async function main() {
   loadDotEnv();
   const config = loadConfig();
-  const { server } = startServer(config);
+  const { server, events, inboxRoutes } = await startServer(config);
 
   server.listen(config.port, '0.0.0.0', () => {
     console.log(`[server] listening on http://0.0.0.0:${config.port}`);
     console.log(`[server] Instagram webhook: /webhooks/instagram`);
-    console.log(`[server] Google Chat webhook: /webhooks/google-chat`);
+    if (inboxRoutes) console.log('[server] web inbox: /login');
+    if (config.chat.space) console.log('[server] Google Chat webhook: /webhooks/google-chat');
     if (!config.instagram.appSecret) console.warn('[server] IG_APP_SECRET is empty — webhooks will be rejected');
-    if (!config.chat.space) console.warn('[server] GOOGLE_CHAT_SPACE is empty — nothing to send to');
+    if (!config.chat.space && !inboxRoutes) console.warn('[server] nothing to deliver to — set GOOGLE_CHAT_SPACE or INBOX_PASSWORD');
   });
 
   for (const signal of ['SIGINT', 'SIGTERM']) {
     process.on(signal, () => {
       console.log(`\n[server] ${signal} received, shutting down`);
+      events.close();
       server.close(() => process.exit(0));
     });
   }
